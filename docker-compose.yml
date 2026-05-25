@@ -1,0 +1,11 @@
+version: "3.9"
+services:
+  refacer:
+    build: .
+    container_name: refacer
+    ports:
+      - "7860:7860"
+    volumes:
+      - .:/app
+      - ./models:/app/models
+    restart: unless-stopped

@@ -1,0 +1,154 @@
+import gradio as gr
+import cv2
+import tempfile
+import uuid
+import os
+import numpy as np
+from tqdm import tqdm
+
+from refacer import Refacer
+import onnxruntime as rt
+from insightface.model_zoo.inswapper import INSwapper
+
+
+# -----------------------------
+#   PHOTO SWAP
+# -----------------------------
+def run_swap(origin_img, dest_img, model_path, blend_strength, progress=gr.Progress()):
+    tmp = tempfile.gettempdir()
+
+    origin_path = os.path.join(tmp, f"origin_{uuid.uuid4().hex}.png")
+    dest_path   = os.path.join(tmp, f"dest_{uuid.uuid4().hex}.png")
+    out_path    = os.path.join(tmp, f"out_{uuid.uuid4().hex}.png")
+
+    cv2.imwrite(origin_path, origin_img)
+    cv2.imwrite(dest_path, dest_img)
+
+    ref = Refacer(force_cpu=False)
+
+    sess = rt.InferenceSession(model_path, ref.sess_options, providers=ref.providers)
+    ref.face_swapper = INSwapper(model_path, sess)
+
+    faces = [{
+        "origin": origin_path,
+        "destination": dest_path,
+        "threshold": 0.5
+    }]
+    ref.prepare_faces(faces)
+
+    result = ref.face_swapper.get(
+        dest_img,
+        ref.replacement_faces[0][1],
+        ref.replacement_faces[0][0],
+        alpha=blend_strength
+    )
+
+    cv2.imwrite(out_path, result)
+    return out_path
+
+
+# -----------------------------
+#   VIDEO SWAP
+# -----------------------------
+def run_video_swap(origin_img, video_file, model_path, blend_strength, progress=gr.Progress()):
+    tmp = tempfile.gettempdir()
+
+    origin_path = os.path.join(tmp, f"origin_{uuid.uuid4().hex}.png")
+    cv2.imwrite(origin_path, origin_img)
+
+    ref = Refacer(force_cpu=False)
+    sess = rt.InferenceSession(model_path, ref.sess_options, providers=ref.providers)
+    ref.face_swapper = INSwapper(model_path, sess)
+
+    faces = [{
+        "origin": origin_path,
+        "destination": origin_path,
+        "threshold": 0.5
+    }]
+    ref.prepare_faces(faces)
+
+    cap = cv2.VideoCapture(video_file)
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    out_path = os.path.join(tmp, f"out_{uuid.uuid4().hex}.mp4")
+    writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+
+    for _ in progress.tqdm(range(total), desc="Обработка видео"):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        swapped = ref.face_swapper.get(
+            frame,
+            ref.replacement_faces[0][1],
+            ref.replacement_faces[0][0],
+            alpha=blend_strength
+        )
+
+        writer.write(swapped)
+
+    cap.release()
+    writer.release()
+
+    return out_path
+
+
+# -----------------------------
+#   UI
+# -----------------------------
+with gr.Blocks() as demo:
+
+    gr.Markdown("# 🔥 Refacer WebUI")
+
+    model_path = gr.Textbox(
+        value="inswapper_128.onnx",
+        label="Путь к модели INSwapper"
+    )
+
+    # <<< ВАЖНО: blend_strength объявляется ДО .click() >>>
+    blend_strength = gr.Slider(
+        minimum=0.0,
+        maximum=1.0,
+        value=1.0,
+        step=0.01,
+        label="Blend Strength (0 = мягко, 1 = жёстко)"
+    )
+
+    # ---------------- PHOTO ----------------
+    gr.Markdown("## 🖼️ FaceSwap для фото")
+
+    with gr.Row():
+        origin = gr.Image(label="Лицо-источник")
+        dest   = gr.Image(label="Куда вставить лицо")
+
+    out = gr.Image(label="Результат")
+    btn = gr.Button("Swap Photo")
+
+    btn.click(
+        run_swap,
+        inputs=[origin, dest, model_path, blend_strength],
+        outputs=[out]
+    )
+
+    # ---------------- VIDEO ----------------
+    gr.Markdown("## 🎬 FaceSwap для видео")
+
+    with gr.Row():
+        origin_video = gr.Image(label="Лицо-источник (фото)")
+        video_input  = gr.Video(label="Видео для обработки")
+
+    video_out = gr.Video(label="Результат")
+    btn_video = gr.Button("Swap Video")
+
+    btn_video.click(
+        run_video_swap,
+        inputs=[origin_video, video_input, model_path, blend_strength],
+        outputs=[video_out]
+    )
+
+
+demo.queue().launch(server_name="0.0.0.0", server_port=7860)
